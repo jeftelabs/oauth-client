@@ -147,3 +147,17 @@ vite.config.ts.timestamp-*
 
 # Turbo Repo
 .turbo
+node_modules
+coverage
+.DS_STORE
+.nyc_output
+.idea
+.vscode/
+*.sublime-project
+*.sublime-workspace
+*.log
+build
+dist
+shrinkwrap.yaml
+.env
+test/__app

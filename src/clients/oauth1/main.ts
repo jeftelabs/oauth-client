@@ -1,0 +1,349 @@
+/*
+ * @jeftelabs/oauth-client
+ *
+ * (c) Jeftelabs
+ *
+ * For the full copyright and license information, please view the LICENSE
+ * file that was distributed with this source code.
+ */
+
+import { parse } from 'node:querystring'
+import { RuntimeException } from '@jeftelabs/exception'
+import type {
+  Oauth1AccessToken,
+  Oauth1ClientConfig,
+  ApiRequestContract,
+  Oauth1RequestToken,
+  RedirectRequestContract,
+} from '../../types.ts'
+
+import debug from '../../debug.ts'
+import { random } from '../../helpers.ts'
+import { Oauth1Signature } from './signature.ts'
+import { HttpClient } from '../../http_client.ts'
+import { UrlBuilder } from '../../url_builder.ts'
+import { E_OAUTH_MISSING_TOKEN, E_OAUTH_STATE_MISMATCH } from '../../errors.ts'
+
+/**
+ * Generic implementation of Oauth1 three leged authorization flow.
+ */
+export class Oauth1Client<Token extends Oauth1AccessToken> {
+  constructor(public options: Oauth1ClientConfig) {}
+
+  /**
+   * Define the request token url. Can be overridden by config
+   */
+  protected requestTokenUrl: string = ''
+
+  /**
+   * Define the authorize url. Can be overridden by config
+   */
+  protected authorizeUrl: string = ''
+
+  /**
+   * Define the access token url. Can be overridden by config
+   */
+  protected accessTokenUrl: string = ''
+
+  /**
+   * Get the signature for the request
+   */
+  protected getSignature(
+    baseUrl: string,
+    method: 'get' | 'post',
+    params: Record<string, any>,
+    requestToken?: Oauth1RequestToken
+  ) {
+    return new Oauth1Signature({
+      url: baseUrl,
+      method: method.toUpperCase(),
+      params: params,
+      consumerKey: this.options.clientId,
+      consumerSecret: this.options.clientSecret,
+      nonce: random(32),
+      unixTimestamp: Math.floor(new Date().getTime() / 1000),
+      oauthToken: requestToken && requestToken.token,
+      oauthTokenSecret: requestToken && requestToken.secret,
+    }).generate()
+  }
+
+  /**
+   * Make a signed request to the authorization server. The request follows
+   * the Oauth1 spec and generates the Authorization header using the
+   * [[Oauth1Signature]] class.
+   */
+  protected async makeSignedRequest(
+    url: string,
+    method: 'get' | 'post',
+    requestToken?: Oauth1RequestToken,
+    callback?: (request: ApiRequestContract) => void
+  ) {
+    const httpClient = this.httpClient(url)
+
+    /**
+     * Invoke callback to allow configuring request
+     */
+    if (typeof callback === 'function') {
+      callback(httpClient)
+    }
+
+    /**
+     * Generate oauth header
+     */
+    const { oauthHeader } = this.getSignature(
+      url,
+      method,
+      {
+        ...httpClient.getParams(),
+        ...httpClient.getOauth1Params(),
+        /**
+         * Consider URLEncoded request body when creating signature header.
+         * However, the fields from JSON body should not be included
+         * in the signature base string.
+         * https://oauth1.wp-api.org/docs/basics/Signing.html#json-data
+         */
+        ...(httpClient.getRequestType() === 'urlencoded' ? httpClient.getFields() : {}),
+      },
+      requestToken
+    )
+
+    /**
+     * Set the oauth header
+     */
+    debug('oauth1 signature: %s', oauthHeader)
+    httpClient.header('Authorization', `OAuth ${oauthHeader}`)
+
+    /**
+     * Make HTTP request
+     */
+    const response = await httpClient[method]()
+    return this.processClientResponse(url, httpClient, response)
+  }
+
+  /**
+   * Configure the redirect request. Invoked before
+   * the user callback.
+   *
+   * The client defaults can be removed using the `clearParam` method
+   */
+  protected configureRedirectRequest(_: RedirectRequestContract) {}
+
+  /**
+   * Configure the access token request. Invoked before
+   * the user callback.
+   *
+   * The client defaults can be removed using the `clearParam` or
+   * `clearOauth1Param` methods
+   */
+  protected configureAccessTokenRequest(_: ApiRequestContract) {}
+
+  /**
+   * Configure the request token request. Invoked before
+   * the user callback.
+   *
+   * The client defaults can be removed using the `clearParam` or
+   * `clearOauth1Param` methods
+   */
+  protected configureRequestTokenRequest(_: ApiRequestContract) {}
+
+  /**
+   * Processing the API client response. The child class can overwrite it
+   * for more control
+   */
+  protected processClientResponse(_: string, client: HttpClient, response: any): any {
+    /**
+     * Return json as it is when parsed response as json
+     */
+    if (client.getResponseType() === 'json') {
+      return response
+    }
+
+    return parse(response)
+  }
+
+  /**
+   * Returns the instance of the HTTP client for internal use
+   */
+  protected httpClient(url: string) {
+    return new HttpClient(url)
+  }
+
+  /**
+   * Returns the instance of the URL builder
+   */
+  protected urlBuilder(url: string) {
+    return new UrlBuilder(url)
+  }
+
+  /**
+   * Verify state and the input value and raise exception if different or missing
+   */
+  verifyState(state: string, inputValue?: string) {
+    if (!state || state !== inputValue) {
+      throw new E_OAUTH_STATE_MISMATCH()
+    }
+  }
+
+  /**
+   * Returns the oauth token and secret for the upcoming requests
+   */
+  async getRequestToken(
+    callback?: (request: ApiRequestContract) => void
+  ): Promise<Oauth1RequestToken> {
+    const requestTokenUrl = this.options.requestTokenUrl || this.requestTokenUrl
+
+    if (!requestTokenUrl) {
+      throw new RuntimeException(
+        'Missing "config.requestTokenUrl". The property is required to get request token'
+      )
+    }
+
+    const requestTokenResponse = await this.makeSignedRequest(
+      requestTokenUrl,
+      'post',
+      undefined,
+      (request) => {
+        request.oauth1Param('oauth_callback', this.options.callbackUrl)
+        this.configureRequestTokenRequest(request)
+
+        if (typeof callback === 'function') {
+          callback(request)
+        }
+      }
+    )
+
+    debug('oauth1 request token response %O', requestTokenResponse)
+    const {
+      oauth_token: oauthToken,
+      oauth_token_secret: oauthTokenSecret,
+      ...parsed
+    } = requestTokenResponse
+
+    /**
+     * We expect the response to have "oauth_token" and "oauth_token_secret"
+     */
+    if (!oauthToken || !oauthTokenSecret) {
+      throw new E_OAUTH_MISSING_TOKEN(E_OAUTH_MISSING_TOKEN.oauth1Message, { cause: parsed })
+    }
+
+    return {
+      token: oauthToken as string,
+      secret: oauthTokenSecret as string,
+      ...parsed,
+    }
+  }
+
+  /**
+   * Returns the redirect url for redirecting the user. We don't pre-define
+   * any params here. However, one must define the "oauth_token" param
+   * by passing a callback.
+   *
+   * ```ts
+   * client.getRedirectUrl((request) => {
+   *   request.param('oauth_token', value)
+   * })
+   * ```
+   */
+  getRedirectUrl(callback?: (request: RedirectRequestContract) => void): string | Promise<string> {
+    const authorizeUrl = this.options.authorizeUrl || this.authorizeUrl
+    if (!authorizeUrl) {
+      throw new RuntimeException(
+        'Missing "config.authorizeUrl". The property is required to make redirect url'
+      )
+    }
+
+    const urlBuilder = this.urlBuilder(authorizeUrl)
+
+    this.configureRedirectRequest(urlBuilder)
+
+    /**
+     * Invoke callback when defined. This is the place where one can configure
+     * the request query params
+     */
+    if (typeof callback === 'function') {
+      callback(urlBuilder)
+    }
+
+    const url = urlBuilder.makeUrl()
+    debug('oauth1 redirect url: "%s"', url)
+
+    return url
+  }
+
+  /**
+   * Get the access token from the oauth_verifier code. One must define
+   * the "oauth_verifier" code using the callback input.
+   *
+   * ```ts
+   * client.getAccessToken({ token, secret }, (request) => {
+   *   request.oauth1Param('oauth_verifier', verifierValue)
+   * })
+   * ```
+   */
+  async getAccessToken(
+    requestToken: Oauth1RequestToken,
+    callback?: (request: ApiRequestContract) => void
+  ): Promise<Token> {
+    const accessTokenUrl = this.options.accessTokenUrl || this.accessTokenUrl
+
+    /**
+     * Even though the spec allows to generate access token without the "oauthTokenSecret".
+     * We enforce both the "oauthToken" and "oauthTokenSecret" to exist. This ensures
+     * better security
+     */
+    if (!requestToken.token) {
+      throw new RuntimeException(
+        'Missing "requestToken.token". The property is required to generate access token'
+      )
+    }
+
+    if (!requestToken.secret) {
+      throw new RuntimeException(
+        'Missing "requestToken.secret". The property is required to generate access token'
+      )
+    }
+
+    if (!accessTokenUrl) {
+      throw new RuntimeException(
+        'Missing "config.accessTokenUrl". The property is required to generate access token'
+      )
+    }
+
+    /**
+     * Make signed request.
+     */
+    const accessTokenResponse = await this.makeSignedRequest(
+      accessTokenUrl,
+      'post',
+      requestToken,
+      (request) => {
+        this.configureAccessTokenRequest(request)
+
+        if (typeof callback === 'function') {
+          callback(request)
+        }
+      }
+    )
+
+    debug('oauth1 access token response %O', accessTokenResponse)
+
+    const {
+      oauth_token: accessOauthToken,
+      oauth_token_secret: accessOauthTokenSecret,
+      ...parsed
+    } = accessTokenResponse
+
+    /**
+     * We expect the response to have "oauth_token" and "oauth_token_secret"
+     */
+    if (!accessOauthToken || !accessOauthTokenSecret) {
+      throw new E_OAUTH_MISSING_TOKEN(E_OAUTH_MISSING_TOKEN.oauth1Message, { cause: parsed })
+    }
+
+    return {
+      token: accessOauthToken as string,
+      secret: accessOauthTokenSecret as string,
+      ...parsed,
+    }
+  }
+}
