@@ -1,0 +1,130 @@
+{
+  "name": "@jeftelabs/oauth-client",
+  "version": "1.0.0",
+  "description": "A framework agnostic package to implement \"Login with\" flow using OAuth compliant authorization servers.",
+  "main": "build/index.js",
+  "type": "module",
+  "files": [
+    "build",
+    "!build/bin",
+    "!build/examples",
+    "!build/tests"
+  ],
+  "exports": {
+    ".": "./build/index.js",
+    "./oauth1": "./build/src/clients/oauth1/main.js",
+    "./oauth2": "./build/src/clients/oauth2/main.js",
+    "./types": "./build/src/types.js"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "pretest": "npm run lint",
+    "test": "c8 npm run quick:test",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "typecheck": "tsc --noEmit",
+    "clean": "del-cli build",
+    "precompile": "npm run lint && npm run clean",
+    "compile": "tsdown",
+    "build": "npm run compile && tsc --emitDeclarationOnly --declaration",
+    "version": "npm run build",
+    "prepublishOnly": "npm run build",
+    "quick:test": "node --import=@jeftelabs/exec --enable-source-maps bin/test.ts",
+    "prepare": "husky",
+		"commitlint": "commitlint --edit",
+		"commit": "cz"
+  },
+  "devDependencies": {
+    "@arapucajs/eslint-config": "^1.2.0",
+		"@arapucajs/prettier": "^1.2.0",
+		"@arapucajs/tsconfig": "^1.0.0",
+    "@t8ngs/assert": "^1.0.0",
+    "@t8ngs/runner": "^1.0.0",
+    "@jeftelabs/exec": "^1.0.1",
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.5.2",
+    "c8": "^11.0.0",
+    "commitizen": "^4.3.2",
+		"cz-conventional-changelog": "^3.3.0",
+		"husky": "^9.1.7",
+    "cookie-parser": "^1.4.7",
+    "del-cli": "^7.0.0",
+    "dotenv": "^17.4.0",
+    "eslint": "^10.2.0",
+    "express": "^5.2.1",
+    "nock": "^14.0.11",
+    "prettier": "^3.8.1",
+    "tsdown": "^0.21.7",
+    "typescript": "^6.0.2"
+  },
+  "dependencies": {
+    "@jeftelabs/exception": "^1.0.1",
+    "ky": "^1.14.3"
+  },
+  "homepage": "https://github.com/jeftelabs/oauth-client#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jeftelabs/oauth-client.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jeftelabs/oauth-client/issues"
+  },
+  "keywords": [
+    "oauth",
+    "oauth1",
+    "oauth2"
+  ],
+  "author": "Jefte Costa <jeftelabs@gmail.com>",
+  "license": "MIT",
+  "commitlint": {
+    "extends": [
+      "@commitlint/config-conventional"
+    ]
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "latest"
+  },
+  "c8": {
+    "reporter": [
+      "text",
+      "html"
+    ],
+    "exclude": [
+      "tests/**"
+    ]
+  },
+  "eslintConfig": {
+    "extends": "@arapucajs/eslint-config/package"
+  },
+  "prettier": "@arapucajs/prettier",
+  "tsdown": {
+    "entry": [
+      "./index.ts",
+      "./src/clients/oauth1/main.ts",
+      "./src/clients/oauth2/main.ts",
+      "./src/types.ts"
+    ],
+    "outDir": "./build",
+    "clean": true,
+    "format": "esm",
+    "minify": "dce-only",
+    "fixedExtension": false,
+    "dts": false,
+    "treeshake": false,
+    "sourcemaps": false,
+    "target": "esnext"
+  },
+  "config": {
+		"commitizen": {
+			"path": "./node_modules/cz-conventional-changelog"
+		}
+	},
+	"husky": {
+		"hooks": {
+			"prepare-commit-msg": "exec < /dev/tty && npx cz --hook || true"
+		}
+	}
+}

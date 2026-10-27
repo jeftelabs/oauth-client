@@ -1,0 +1,39 @@
+name: Release
+on:
+  push:
+    branches:
+      - main
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          release-type: node
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+      - name: Install dependencies
+        if: ${{ steps.release.outputs.release_created }}
+        run: npm install
+      - name: Build Release Artifact
+        if: ${{ steps.release.outputs.release_created }}
+        run: |
+          npm run build
+          mkdir -p artifact
+          npm pack --pack-destination artifact
+      - name: Upload Release Artifact
+        if: ${{ steps.release.outputs.release_created }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload ${{ steps.release.outputs.tag_name }} artifact/*.tgz

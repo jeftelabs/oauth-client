@@ -1,0 +1,393 @@
+/*
+ * @jeftelabs/oauth-client
+ *
+ * (c) Jeftelabs
+ *
+ * For the full copyright and license information, please view the LICENSE
+ * file that was distributed with this source code.
+ */
+
+import nock from 'nock'
+import { test } from '@t8ngs/runner'
+import { parse } from 'node:querystring'
+import { Oauth2Client } from '../src/clients/oauth2/main.ts'
+
+class Oauth2PkceClient extends Oauth2Client<any> {
+  constructor(
+    options: ConstructorParameters<typeof Oauth2Client>[0],
+    private redirectCodeVerifier: string | null,
+    private accessTokenCodeVerifier: string | null = redirectCodeVerifier,
+    private codeChallengeMethod: 'S256' | 'plain' = 'S256'
+  ) {
+    super(options)
+  }
+
+  protected getPkceCodeVerifierForRedirect() {
+    return this.redirectCodeVerifier
+  }
+
+  protected getPkceCodeVerifierForAccessToken() {
+    return this.accessTokenCodeVerifier
+  }
+
+  protected getPkceCodeChallengeMethod() {
+    return this.codeChallengeMethod
+  }
+
+  codeChallengeForTesting(codeVerifier: string) {
+    return this.makeCodeChallenge(codeVerifier, this.codeChallengeMethod)
+  }
+
+  static forRedirect(
+    options: ConstructorParameters<typeof Oauth2Client>[0],
+    codeVerifier: string,
+    codeChallengeMethod: 'S256' | 'plain' = 'S256'
+  ) {
+    return new Oauth2PkceClient(options, codeVerifier, codeVerifier, codeChallengeMethod)
+  }
+
+  static forAccessToken(
+    options: ConstructorParameters<typeof Oauth2Client>[0],
+    codeVerifier: string
+  ) {
+    return new Oauth2PkceClient(options, null, codeVerifier)
+  }
+}
+
+test.group('Oauth2Client | state', () => {
+  test('generate a random state string', async ({ assert }) => {
+    const request = new Oauth2Client({
+      authorizeUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+      callbackUrl: '',
+      accessTokenUrl: '',
+      clientId: 'a-dummy-consumer-key',
+      clientSecret: 'a-dummy-consumer-secret',
+    })
+
+    assert.lengthOf(request.getState(), 32)
+  })
+
+  test('throw when state and input values are not the same', ({ assert }) => {
+    const request = new Oauth2Client({
+      callbackUrl: '',
+      authorizeUrl: '',
+      accessTokenUrl: '',
+      clientId: 'a-dummy-consumer-key',
+      clientSecret: 'a-dummy-consumer-secret',
+    })
+
+    assert.throws(() => request.verifyState('foo', 'bar'), 'Unable to verify re-redirect state')
+  })
+})
+
+test.group('Oauth2Client | redirect url', () => {
+  test('make redirect url', async ({ assert }) => {
+    const request = new Oauth2Client({
+      authorizeUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+      callbackUrl: '',
+      accessTokenUrl: '',
+      clientId: 'a-dummy-consumer-key',
+      clientSecret: 'a-dummy-consumer-secret',
+    })
+
+    const url = request.getRedirectUrl()
+    assert.equal(
+      url,
+      'https://accounts.google.com/o/oauth2/v2/auth?redirect_uri=&client_id=a-dummy-consumer-key'
+    )
+  })
+
+  test('throw when authorize url is missing', async ({ assert }) => {
+    const request = new Oauth2Client({
+      authorizeUrl: '',
+      callbackUrl: '',
+      accessTokenUrl: '',
+      clientId: 'a-dummy-consumer-key',
+      clientSecret: 'a-dummy-consumer-secret',
+    })
+
+    assert.throws(
+      () => request.getRedirectUrl(),
+      'Missing "config.authorizeUrl". The property is required to make redirect url'
+    )
+  })
+
+  test('modify redirect url params', async ({ assert }) => {
+    const request = new Oauth2Client({
+      authorizeUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+      callbackUrl: '',
+      accessTokenUrl: '',
+      clientId: 'a-dummy-consumer-key',
+      clientSecret: 'a-dummy-consumer-secret',
+    })
+
+    const url = request.getRedirectUrl((req) => req.param('grant_type', 'authorization_code'))
+    assert.equal(
+      url,
+      'https://accounts.google.com/o/oauth2/v2/auth?redirect_uri=&client_id=a-dummy-consumer-key&grant_type=authorization_code'
+    )
+  })
+
+  test('override default redirect url params', async ({ assert }) => {
+    const request = new Oauth2Client({
+      authorizeUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+      callbackUrl: 'http://localhost:3000/callback',
+      accessTokenUrl: '',
+      clientId: 'a-dummy-consumer-key',
+      clientSecret: 'a-dummy-consumer-secret',
+    })
+
+    const url = request.getRedirectUrl((req) =>
+      req.param('redirect_uri', 'http://localhost:3000/link/callback')
+    )
+    assert.equal(
+      url,
+      'https://accounts.google.com/o/oauth2/v2/auth?redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Flink%2Fcallback&client_id=a-dummy-consumer-key'
+    )
+  })
+
+  test('add pkce params when child class provides code verifier', async ({ assert }) => {
+    const request = Oauth2PkceClient.forRedirect(
+      {
+        authorizeUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+        callbackUrl: '',
+        accessTokenUrl: '',
+        clientId: 'a-dummy-consumer-key',
+        clientSecret: 'a-dummy-consumer-secret',
+      },
+      'verifier-123'
+    )
+
+    const url = request.getRedirectUrl()
+    assert.equal(
+      url,
+      `https://accounts.google.com/o/oauth2/v2/auth?redirect_uri=&client_id=a-dummy-consumer-key&code_challenge=${request.codeChallengeForTesting(
+        'verifier-123'
+      )}&code_challenge_method=S256`
+    )
+  })
+
+  test('support plain pkce challenge method', async ({ assert }) => {
+    const request = Oauth2PkceClient.forRedirect(
+      {
+        authorizeUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+        callbackUrl: '',
+        accessTokenUrl: '',
+        clientId: 'a-dummy-consumer-key',
+        clientSecret: 'a-dummy-consumer-secret',
+      },
+      'verifier-123',
+      'plain'
+    )
+
+    const url = request.getRedirectUrl()
+    assert.equal(
+      url,
+      'https://accounts.google.com/o/oauth2/v2/auth?redirect_uri=&client_id=a-dummy-consumer-key&code_challenge=verifier-123&code_challenge_method=plain'
+    )
+  })
+})
+
+test.group('Oauth2Client | access token', () => {
+  test('get access token from the authorization server', async ({ assert }) => {
+    assert.plan(2)
+
+    nock('https://oauth2.googleapis.com')
+      .post('/token')
+      .query({ code: '1234' })
+      .reply(function (_, body) {
+        assert.deepEqual(parse(body as string), {
+          grant_type: 'authorization_code',
+          redirect_uri: '',
+          client_id: 'a-dummy-consumer-key',
+          client_secret: 'a-dummy-consumer-secret',
+        })
+
+        return [200, { access_token: '1234', type: 'bearer' }]
+      })
+
+    const request = new Oauth2Client({
+      authorizeUrl: '',
+      callbackUrl: '',
+      accessTokenUrl: 'https://oauth2.googleapis.com/token',
+      clientId: 'a-dummy-consumer-key',
+      clientSecret: 'a-dummy-consumer-secret',
+    })
+
+    const response = await request.getAccessToken((req) => req.param('code', '1234'))
+    assert.containsSubset(response, { token: '1234', type: 'bearer' })
+  })
+
+  test('send pkce code verifier when child class provides it', async ({ assert }) => {
+    assert.plan(2)
+
+    nock('https://oauth2.googleapis.com')
+      .post('/token')
+      .query({ code: '1234' })
+      .reply(function (_, body) {
+        assert.deepEqual(parse(body as string), {
+          grant_type: 'authorization_code',
+          redirect_uri: '',
+          client_id: 'a-dummy-consumer-key',
+          client_secret: 'a-dummy-consumer-secret',
+          code_verifier: 'verifier-123',
+        })
+
+        return [200, { access_token: '1234', type: 'bearer' }]
+      })
+
+    const request = Oauth2PkceClient.forAccessToken(
+      {
+        authorizeUrl: '',
+        callbackUrl: '',
+        accessTokenUrl: 'https://oauth2.googleapis.com/token',
+        clientId: 'a-dummy-consumer-key',
+        clientSecret: 'a-dummy-consumer-secret',
+      },
+      'verifier-123'
+    )
+
+    const response = await request.getAccessToken((req) => req.param('code', '1234'))
+    assert.containsSubset(response, { token: '1234', type: 'bearer' })
+  })
+
+  test('parse urlencoded response from the server', async ({ assert }) => {
+    assert.plan(2)
+
+    nock('https://oauth2.googleapis.com')
+      .post('/token')
+      .query({ code: '1234' })
+      .reply(function (_, body) {
+        assert.deepEqual(parse(body as string), {
+          grant_type: 'authorization_code',
+          redirect_uri: '',
+          client_id: 'a-dummy-consumer-key',
+          client_secret: 'a-dummy-consumer-secret',
+        })
+
+        return [200, 'access_token=1234&type=bearer']
+      })
+
+    const request = new Oauth2Client({
+      authorizeUrl: '',
+      callbackUrl: '',
+      accessTokenUrl: 'https://oauth2.googleapis.com/token',
+      clientId: 'a-dummy-consumer-key',
+      clientSecret: 'a-dummy-consumer-secret',
+    })
+
+    const response = await request.getAccessToken((req) => {
+      req.param('code', '1234')
+      req.parseAs('text')
+    })
+    assert.containsSubset(response, { token: '1234', type: 'bearer' })
+  })
+
+  test('parse text response from the server', async ({ assert }) => {
+    assert.plan(2)
+
+    nock('https://oauth2.googleapis.com')
+      .post('/token')
+      .query({ code: '1234' })
+      .reply(function (_, body) {
+        assert.deepEqual(parse(body as string), {
+          grant_type: 'authorization_code',
+          redirect_uri: '',
+          client_id: 'a-dummy-consumer-key',
+          client_secret: 'a-dummy-consumer-secret',
+        })
+
+        return [200, Buffer.from('access_token=1234&type=bearer')]
+      })
+
+    const request = new Oauth2Client({
+      authorizeUrl: '',
+      callbackUrl: '',
+      accessTokenUrl: 'https://oauth2.googleapis.com/token',
+      clientId: 'a-dummy-consumer-key',
+      clientSecret: 'a-dummy-consumer-secret',
+    })
+
+    const response = await request.getAccessToken((req) => {
+      req.param('code', '1234')
+      req.parseAs('text')
+    })
+    assert.containsSubset(response, { token: '1234', type: 'bearer' })
+  })
+
+  test('generate "expirestAt" date instance from "expiresIn" property', async ({ assert }) => {
+    assert.plan(3)
+
+    nock('https://oauth2.googleapis.com')
+      .post('/token')
+      .query({ code: '1234' })
+      .reply(function (_, body) {
+        assert.deepEqual(parse(body as string), {
+          grant_type: 'authorization_code',
+          redirect_uri: '',
+          client_id: 'a-dummy-consumer-key',
+          client_secret: 'a-dummy-consumer-secret',
+        })
+
+        return [200, { access_token: '1234', type: 'bearer', expires_in: 3600 }]
+      })
+
+    const request = new Oauth2Client({
+      authorizeUrl: '',
+      callbackUrl: '',
+      accessTokenUrl: 'https://oauth2.googleapis.com/token',
+      clientId: 'a-dummy-consumer-key',
+      clientSecret: 'a-dummy-consumer-secret',
+    })
+
+    const response = await request.getAccessToken((req) => req.param('code', '1234'))
+    assert.instanceOf(response.expiresAt, Date)
+    assert.isAbove(response.expiresAt!.getTime(), new Date().getTime())
+  })
+
+  test('raise error when authorization server does not return access token', async ({ assert }) => {
+    assert.plan(2)
+
+    nock('https://oauth2.googleapis.com')
+      .post('/token')
+      .query({ code: '1234' })
+      .reply(function (_, body) {
+        assert.deepEqual(parse(body as string), {
+          grant_type: 'authorization_code',
+          redirect_uri: '',
+          client_id: 'a-dummy-consumer-key',
+          client_secret: 'a-dummy-consumer-secret',
+        })
+
+        return [200, { type: 'bearer' }]
+      })
+
+    const request = new Oauth2Client({
+      authorizeUrl: '',
+      callbackUrl: '',
+      accessTokenUrl: 'https://oauth2.googleapis.com/token',
+      clientId: 'a-dummy-consumer-key',
+      clientSecret: 'a-dummy-consumer-secret',
+    })
+
+    await assert.rejects(
+      () => request.getAccessToken((req) => req.param('code', '1234')),
+      'Invalid oauth2 response. Missing "access_token"'
+    )
+  })
+
+  test('raise error when "config.accessTokenUrl" is missing', async ({ assert }) => {
+    const request = new Oauth2Client({
+      authorizeUrl: '',
+      callbackUrl: '',
+      accessTokenUrl: '',
+      clientId: 'a-dummy-consumer-key',
+      clientSecret: 'a-dummy-consumer-secret',
+    })
+
+    await assert.rejects(
+      () => request.getAccessToken(),
+      'Missing "config.accessTokenUrl". The property is required to get access token'
+    )
+  })
+})
